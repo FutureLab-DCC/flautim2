@@ -53,6 +53,7 @@ class Experiment(fl.client.NumPyClient):
         
         #for epochs in range(1, self.epochs+1):
         loss, values_metrics_train = self.training_loop(self.dataset.dataloader())
+        values_metrics_train['LOSS'] = loss
         for name in values_metrics_train:
                 self.measures.log(self, name, values_metrics_train[name], validation=False, epoch = self.epoch_fl)
                 return_dic[name] = float(values_metrics_train[name])
@@ -74,10 +75,9 @@ class Experiment(fl.client.NumPyClient):
         self.epoch_fl = config["server_round"]
         
         loss, values_metrics_validation = self.validation_loop(self.dataset.dataloader(validation = True))
+        values_metrics_validation['LOSS'] = loss
 
-        self.log("Model training finished", details="", object="experiment_evaluate" )
-
-        self.log(f"Mesure: "+ 'metrics.' + str(values_metrics_validation), details="", object="", object_id=self.id)
+        self.log("Model evaluation finished", details="", object="experiment_evaluate" )
 
         for name in values_metrics_validation:
                 #self.log(f"Mesure: "+ 'metrics.' + str(name) , details="", object="", object_id=self.id)
