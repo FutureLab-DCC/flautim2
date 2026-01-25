@@ -5,6 +5,7 @@ import flautim2 as fl
 from flautim2.pytorch import Model
 from flautim2.pytorch.common import ExperimentContext, ExperimentStatus, update_experiment_status, copy_model_wights, Config
 import time
+import traceback
 
 class Experiment(object):
     def __init__(self, model : Model, dataset : Dataset, context, **kwargs) -> None:
@@ -87,34 +88,34 @@ class Experiment(object):
         # metrics['LOSS'] = None
         self.metrics = Config(metrics)
 
-        logging.basicConfig(filename=name_log,
-                        filemode='w',  # 'a' para append, 'w' para sobrescrever
-                        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                        level=logging.INFO)
+        #logging.basicConfig(filename=name_log,
+        #                filemode='w',  # 'a' para append, 'w' para sobrescrever
+        #                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        #                level=logging.INFO)
         
-        root = logging.getLogger()
-        root.setLevel(logging.INFO)
+        #root = logging.getLogger()
+        #root.setLevel(logging.INFO)
         
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
-        console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+        #console_handler = logging.StreamHandler()
+        #console_handler.setLevel(logging.INFO)
+        #console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 
-        root.addHandler(console_handler)
+        #root.addHandler(console_handler)
 
         fl.log(common.get_pod_log_info())
 
         fl.log(f"Starting Centralized Training")
 
-        def schedule_file_logging():
-            schedule.every(2).seconds.do(self.context.backend.write_experiment_results_callback('./centralized.log', self.id)) 
+        #def schedule_file_logging():
+        #    schedule.every(2).seconds.do(self.context.backend.write_experiment_results_callback('./centralized.log', self.id)) 
         
-            while True:
-                schedule.run_pending()
-                time.sleep(1)
+        #    while True:
+        #        schedule.run_pending()
+        #        time.sleep(1)
 
-        thread_schedulling = threading.Thread(target=schedule_file_logging)
-        thread_schedulling.daemon = True
-        thread_schedulling.start()
+        #thread_schedulling = threading.Thread(target=schedule_file_logging)
+        #thread_schedulling.daemon = True
+        #thread_schedulling.start()
 
 
         try:
@@ -125,6 +126,8 @@ class Experiment(object):
             #self.evaluate()
         
             update_experiment_status(self.context.backend, self.id, "finished")
+            
+            self.model.save()
 
             copy_model_wights(self.context.filesystem.path, self.context.filesystem.output_path, self.id, self.context.logger) 
 
@@ -136,7 +139,7 @@ class Experiment(object):
             fl.log(f"Stacktrace of Error during Centralized Training: {traceback.format_exc()}")
             
         
-        self.context.backend.write_experiment_results('./centralized.log', self.id)
+        #self.context.backend.write_experiment_results('./centralized.log', self.id)
 
 
 

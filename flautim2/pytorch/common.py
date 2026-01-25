@@ -20,6 +20,14 @@ import platform
 import psutil
 import subprocess
 
+from flautim2.pytorch.h5_store import save_event, read_events 
+
+import json
+import threading
+from bson import ObjectId 
+from contextlib import nullcontext
+
+
 def get_pod_log_info() -> str:
     info = []
 
@@ -72,41 +80,58 @@ class Backend(object):
         self._user = kwargs.get('user', None)
         self._pw = kwargs.get('password', None)
         self._db = kwargs.get('authentication', 'admin')
-        self._db_name = kwargs.get("db_name", "flautim")
+        self._db_name = kwargs.get("db_name", "flautim") 
+        self._h5_dir = kwargs.get("h5_dir", None) 
+        self._experiment_id = kwargs.get("experiment_id", None) 
 
     @property
     def connection_string(self):
         return f"mongodb://{self._user}:{self._pw}@{self._server}:{self._port}"
         
     def get_db(self):
+        if self._server == None:
+            return None
+        
         self.connection = pymongo.MongoClient("mongodb://{}:{}@{}:{}".format(self._user, self._pw, self._server, self._port))
         self.db = self.connection["flautim"]
+        
         return self.db
         
     def write_db(self, msg, collection):
-        with pymongo.MongoClient(self.connection_string) as client:
-            db = client[self._db_name]
-            db[collection].insert_one(msg)
+        if self._server != None:
+            with pymongo.MongoClient(self.connection_string) as client:
+                db = client[self._db_name]
+                db[collection].insert_one(msg)
+        
+        save_event( base_dir=self._h5_dir, experiment_id=str(self._experiment_id), collection=str(collection), doc=msg )
+            
+        print("[DB save]", collection, msg , sep="|")
+
 
     def close_db(self):
         self.connection.close()
-        
+
     def write_experiment_results(self, file_path, experiment):
-        with pymongo.MongoClient(self.connection_string) as client:
-            db = client[self._db_name]
-            collection = db["experiment_results"]
-            filter_query = {"Experiment": experiment}
-
-            # Read file content
-            with open(file_path, "r") as file:
-                content = file.read()
-
-            # Check if document exists, update or insert
-            if collection.find_one(filter_query) is None:
-                collection.insert_one({"Experiment": experiment, "content": content})
-            else:
-                collection.update_one(filter_query, {"$set": {"content": content}})
-
+		# Read file content
+        with open(file_path, "r") as file:
+            content = file.read()
+		   
+        if self._server != None:
+            with pymongo.MongoClient(self.connection_string) as client:
+                db = client[self._db_name]
+                collection = db["experiment_results"]
+                filter_query = {"Experiment": experiment}
+ 
+				# Check if document exists, update or insert
+                if collection.find_one(filter_query) is None:
+                   collection.insert_one({"Experiment": experiment, "content": content})
+                else:
+                   collection.update_one(filter_query, {"$set": {"content": content}})
+          
+           
+        save_event( base_dir=self._h5_dir, experiment_id=str(self._experiment_id), collection=str("experiment_results"), doc={"Experiment": experiment, "content": content} )
+        print("[DB save]", "experiment_results", str(content) , sep="|")   
+                        
     
     def write_experiment_results_callback(self, file_path, experiment):
         def fn_callback():
@@ -127,15 +152,47 @@ def get_argparser():
     parser.add_argument("--clients", type=int, required=False, default=3)
     parser.add_argument("--rounds", type=int, required=False, default=10)
     parser.add_argument("--epochs", type=int, required=False, default=10)
+    parser.add_argument("--h5_dir", type=str, required=True)
     parser.add_argument("--IDexperiment", type=str, required=True, default=0)
     ctx = parser.parse_args()
     
-    backend = Backend(server = ctx.dbserver, port = ctx.dbport, user = ctx.dbuser, password=ctx.dbpw)
+    backend = Backend(server = ctx.dbserver, port = ctx.dbport, user = ctx.dbuser, password=ctx.dbpw,
+                               h5_dir = ctx.h5_dir, experiment_id = ctx.IDexperiment)
     
     logger = Logger(backend, ctx)
     measures = Measures(backend, ctx)
     
     return parser, ctx, backend, logger, measures
+
+#--------------------------------------------
+#GAMBIARRA TEMPORARIA
+def get_argparser2():
+	import yaml
+	with open('./configs/config.yaml') as f:
+		cfg = yaml.safe_load(f)
+		
+		ctx = argparse.ArgumentParser()			  
+		ctx.user = cfg['user']
+		ctx.path = cfg['path']
+		ctx.output_path = cfg['output_path']
+		ctx.dbserver = cfg['db_server']
+		ctx.dbport = cfg['db_port']
+		ctx.dbuser = cfg['db_user']
+		ctx.dbpw = cfg['db_pw'] 
+		ctx.clients = "3"
+		ctx.round = "10"
+		ctx.epochs = "10"
+		ctx.IDexperiment = cfg['experiment_id']
+		ctx.h5_dir = cfg['h5_dir']
+		
+		backend = Backend(server = ctx.dbserver, port = ctx.dbport, user = ctx.dbuser, password=ctx.dbpw,
+                               h5_dir = ctx.h5_dir, experiment_id = ctx.IDexperiment)
+
+		logger = Logger(backend, ctx)
+		measures = Measures(backend, ctx)
+			   
+		return cfg, ctx, backend, logger, measures
+#--------------------------------------------
 
 class Logger(object):
     def __init__(self, backend, context):
@@ -170,7 +227,193 @@ class Measures(object):
         data.update(append)
         
         self.backend.write_db(data, collection = 'measures')
-     
+
+class Output(object):
+    """
+    Interface de alto nível para salvar *outputs* no HDF5 de forma simples,
+    semelhante a flautim.log() e flautim.measures().
+
+    Exemplos de uso pelo usuário:
+        flautim.output.image(img_bytes)
+        flautim.output.array(weights)
+        flautim.output.text("modelo final salvo")
+        flautim.output.json({"acc": 0.95, "epoch": 10})
+
+    Cada chamada:
+      1) salva o conteúdo físico no HDF5 (/outputs/blobs ou /outputs/arrays)
+      2) gera um identificador único (ref)
+      3) opcionalmente registra um evento em /outputs/events com metadados
+    """
+
+    def __init__(self, backend, context):
+        """
+        backend  -> backend de banco (Mongo/SQLite), não usado diretamente aqui,
+                    mas mantido para simetria com Logger/Measures.
+        context  -> contexto global do experimento (contém h5_dir e experiment.id)
+        """
+        self.backend = backend
+        self.context = context
+
+    # ============================================================
+    # IMAGEM (PNG/JPEG/etc.)
+    # ============================================================
+    def image(self, content: bytes, name=None, meta=None):
+        """
+        Salva uma imagem no HDF5.
+
+        Parâmetros:
+        - content : bytes da imagem (ex: PNG gerado com matplotlib)
+        - name    : nome lógico (ex: "confusion_epoch_5.png")
+        - meta    : dicionário opcional com metadados (epoch, acc, data, etc.)
+
+        Retorno:
+        - ref (string): identificador único do arquivo salvo no HDF5
+        """
+        from flautim2.pytorch.h5_store import save_output, save_event
+
+        # Salva fisicamente a imagem em /outputs/blobs/<ref>
+        ref = save_output(
+            base_dir=self.context.filesystem.h5_dir,
+            experiment_id=self.context.experiment.id,
+            kind="image",
+            content=content,
+            name=name,
+            mime="image/png",
+        )
+
+        # Se houver metadados, cria um evento em /outputs/events
+        # para facilitar busca/auditoria
+        if meta:
+            save_event(
+                base_dir=self.context.filesystem.h5_dir,
+                experiment_id=self.context.experiment.id,
+                collection="outputs",
+                doc={"ref": ref, **meta},
+            )
+
+        return ref
+
+    # ============================================================
+    # ARRAY NUMÉRICO (numpy / torch -> numpy)
+    # ============================================================
+    def array(self, arr, name=None, meta=None):
+        """
+        Salva um array (ex: pesos, embeddings, matrizes) no HDF5.
+
+        Parâmetros:
+        - arr  : numpy array
+        - name : nome lógico (ex: "weights_epoch_10")
+        - meta : metadados opcionais
+
+        O array é salvo em:
+            /outputs/arrays/<ref>
+        """
+        from flautim2.pytorch.h5_store import save_output, save_event
+
+        ref = save_output(
+            base_dir=self.context.filesystem.h5_dir,
+            experiment_id=self.context.experiment.id,
+            kind="array",
+            content=arr,
+            name=name,
+        )
+
+        if meta:
+            save_event(
+                base_dir=self.context.filesystem.h5_dir,
+                experiment_id=self.context.experiment.id,
+                collection="outputs",
+                doc={"ref": ref, **meta},
+            )
+
+        return ref
+
+    # ============================================================
+    # TEXTO SIMPLES
+    # ============================================================
+    def text(self, text: str, name=None, meta=None):
+        """
+        Salva um texto simples no HDF5.
+
+        Exemplos:
+            - logs longos
+            - resumo do experimento
+            - configuração em texto
+
+        O texto é salvo como blob (bytes UTF-8).
+        """
+        from flautim2.pytorch.h5_store import save_output, save_event
+
+        ref = save_output(
+            base_dir=self.context.filesystem.h5_dir,
+            experiment_id=self.context.experiment.id,
+            kind="text",
+            content=text,
+            name=name,
+        )
+
+        if meta:
+            save_event(
+                base_dir=self.context.filesystem.h5_dir,
+                experiment_id=self.context.experiment.id,
+                collection="outputs",
+                doc={"ref": ref, **meta},
+            )
+
+        return ref
+
+    # ============================================================
+    # JSON (dict/list)
+    # ============================================================
+    def json(self, obj, name=None, meta=None):
+        """
+        Salva um objeto Python (dict ou list) como JSON no HDF5.
+
+        Exemplos:
+            flautim.output.json({"epoch": 5, "acc": 0.91})
+
+        Internamente:
+          - o objeto é serializado com json.dumps
+          - salvo como blob (application/json)
+
+        Parâmetros:
+        - obj  : dict ou list
+        - name : nome lógico do arquivo (ex: "metrics_epoch_5.json")
+        - meta : metadados opcionais
+
+        Retorno:
+        - ref (string): identificador único no HDF5
+        """
+        from .h5_store import save_output, save_event
+        import json
+
+        # Serializa o objeto Python para string JSON
+        payload = json.dumps(obj, ensure_ascii=False, indent=2)
+
+        # Salva o JSON como blob no HDF5
+        ref = save_output(
+            base_dir=self.context.filesystem.h5_dir,
+            experiment_id=self.context.experiment.id,
+            kind="json",
+            content=payload,                 # string JSON
+            name=name or "data.json",
+            mime="application/json",
+        )
+
+        # Registra evento de output para indexação/busca
+        if meta:
+            doc = {"ref": ref, "kind": "json", "name": name or "data.json", **meta}
+            save_event(
+                base_dir=self.context.filesystem.h5_dir,
+                experiment_id=self.context.experiment.id,
+                collection="outputs",
+                doc=doc,
+            )
+
+        return ref
+
+        
+                  
 class ExperimentStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -178,7 +421,7 @@ class ExperimentStatus(str, Enum):
     ABORTED = "aborted"
     ERROR = "error"
 
-def get_experiment_variables(context):
+def get_experiment_variables(context, all_var = False):
     # backend = Backend(
     #     server = context.db.dbserver,
     #     port = context.db.dbport,
@@ -186,15 +429,24 @@ def get_experiment_variables(context):
     #     password = context.db.dbpw
     # )
     # Use context manager to avoid leaks
-    with pymongo.MongoClient(context.backend.connection_string) as client:
-        db = client["flautim"]
-        experiments = db["experimento"]
-        experiment = experiments.find_one({"_id": context.experiment.id})
-       
-        return {"projectId": experiment["projectId"],
-                "modelId": experiment["modelId"],
-                "datasetId": experiment["datasetId"],
-                "acronym": experiment["acronym"]}
+    if context.backend._server == None:
+        return {"projectId": None,
+				"modelId": None,
+				"datasetId": None,
+				"acronym": None}
+    else:
+        with pymongo.MongoClient(context.backend.connection_string) as client:
+            db = client["flautim"]
+            experiments = db["experimento"]
+            experiment = experiments.find_one({"_id": context.experiment.id})
+		   
+            if all_var == True:
+                 return experiment
+            else:
+                 return {"projectId": experiment["projectId"],
+						"modelId": experiment["modelId"],
+						"datasetId": experiment["datasetId"],
+						"acronym": experiment["acronym"]}
 
 
 class ExperimentContext(object):
@@ -209,7 +461,7 @@ class ExperimentContext(object):
         self.dataset = variables["datasetId"]
         self.acronym = variables["acronym"]
 
-    def status(self, stat: ExperimentStatus):
+    def status(self, stat: ExperimentStatus): 
         filter = { '_id': self.id }
         newvalues = { "$set": { 'status': str(stat) } }
         self.experiments.update_one(filter, newvalues)
@@ -298,8 +550,7 @@ def weighted_average(metrics) :
 
 def run_federated(client_fn, server_fn, name_log = 'flower.log', post_processing_fn = [], **kwargs):
 
-    #self.metrics = Config(metrics)
-
+    #self.metrics = Config(metrics) 
     logging.basicConfig(filename=name_log,
                     filemode='w',  # 'a' para append, 'w' para sobrescrever
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -315,7 +566,8 @@ def run_federated(client_fn, server_fn, name_log = 'flower.log', post_processing
     console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
     flower_logger.addHandler(console_handler)
 
-    _, ctx, backend, logger, _ = get_argparser()
+    #_, ctx, backend, logger, _ = get_argparser()
+    _, ctx, backend, logger, _ = get_argparser2()
     experiment_id = ctx.IDexperiment
     path = ctx.path
     output_path = ctx.output_path
@@ -345,10 +597,25 @@ def run_federated(client_fn, server_fn, name_log = 'flower.log', post_processing
         
         client_app = ClientApp(client_fn=client_fn)
         server_app = ServerApp(server_fn=server_fn)
+
+        #client_resources = kwargs.get('client_resources', {"num_cpus": 1, "num_gpus": 0.0})
         
+        # GPU check using nvidia-smi (if available)
+        try:
+            result = subprocess.run( 
+				["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits"], 
+				capture_output=True, text=True, check=True 
+            ) 
+            client_resources = kwargs.get('client_resources', {"num_cpus": 1, "num_gpus": 0.5}) 
+            logger.log("client_resources"+str(client_resources))
+        except Exception:
+            client_resources = kwargs.get('client_resources', {"num_cpus": 1, "num_gpus": 0.0})
+            logger.log("client_resources"+str(client_resources))
+       
+                
         flwr.simulation.run_simulation(server_app=server_app, client_app=client_app, 
                                      num_supernodes=num_clients,
-                                     backend_config={"client_resources": {"num_cpus": 1, "num_gpus": 0.5}})
+                                     backend_config={"client_resources": client_resources})
 
         update_experiment_status(backend, experiment_id, "finished") 
 
@@ -364,10 +631,17 @@ def run_federated(client_fn, server_fn, name_log = 'flower.log', post_processing
 
 
 def update_experiment_status(backend, id, status):
-    filter = { '_id': id }
-    newvalues = { "$set": { 'status': status } }
-    experiments = backend.get_db()['experimento']
-    experiments.update_one(filter, newvalues)
+	 
+	experiment_variables = read_events( base_dir=backend._h5_dir, experiment_id=id, collection = "experimento", where={"experiment_id": id } )[-1]
+	experiment_variables["lastupdate"] = str(datetime.now())
+	experiment_variables["status"] = status
+	save_event( base_dir=backend._h5_dir, experiment_id=id, collection="experimento", doc=experiment_variables )
+		
+	if backend._server != None:
+		filter = { '_id': id }
+		newvalues = { "$set": { 'status': status } }
+		experiments = backend.get_db()['experimento']
+		experiments.update_one(filter, newvalues)
 
 
 def copy_model_wights(path, output_path, id, logger):
@@ -401,7 +675,5 @@ class Config(dict):
 
     def __setattr__(self, name, value):
         self[name] = value
-
-
 
 
