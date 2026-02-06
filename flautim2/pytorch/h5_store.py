@@ -58,6 +58,7 @@ import glob
 import hashlib
 import threading
 from typing import Any, Dict, Optional, Iterable, List, Set
+from pathvalidate import sanitize_filename
 
 import h5py
 import numpy as np
@@ -85,6 +86,7 @@ def shard_path(base_dir: str, experiment_id: str) -> str:
     """
     os.makedirs(base_dir, exist_ok=True)
     pid = os.getpid()
+    experiment_id = sanitize_filename(experiment_id)
     return os.path.join(base_dir, f"shard_{experiment_id}_pid{pid}.h5")
 
 
@@ -92,6 +94,7 @@ def list_shards(base_dir: str, experiment_id: str) -> List[str]:
     """
     Lista todos os shards daquele experimento no diretório base_dir.
     """
+    experiment_id = sanitize_filename(experiment_id)
     pattern = os.path.join(base_dir, f"shard_{experiment_id}_pid*.h5")
     return sorted(glob.glob(pattern))
 
@@ -100,6 +103,7 @@ def default_merged_path(base_dir: str, experiment_id: str) -> str:
     """
     Caminho padrão do arquivo final mesclado.
     """
+    experiment_id = sanitize_filename(experiment_id)
     os.makedirs(base_dir, exist_ok=True)
     return os.path.join(base_dir, f"merged_{experiment_id}.h5")
 
@@ -460,6 +464,80 @@ def save_output(
 # Leitura de eventos
 # ============================================================================
  
+def _read_events_from_h5file(
+    h5_path: str,
+    collection: str,
+    *,
+    where: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Lê eventos de um único arquivo HDF5.
+
+    Esta função é responsável apenas por abrir um arquivo específico
+    (.h5), localizar o dataset de eventos e converter cada registro
+    JSON armazenado em um dicionário Python.
+
+    Parâmetros:
+    h5_path : str
+        Caminho completo do arquivo HDF5 que será lido.
+
+    collection : str
+        Nome da coleção (grupo) dentro do HDF5.
+        Os eventos são esperados em:
+            /<collection>/events
+
+    where : dict, opcional
+        Filtro simples no formato:
+            {"campo": valor}
+        Apenas eventos que possuem exatamente esse valor no campo
+        serão retornados.
+
+    Retorno:
+    List[Dict[str, Any]]
+        Lista de eventos já convertidos para dicionários Python.
+
+    Observações:
+    - Cada evento recebe campos auxiliares:
+        _index  → posição dentro do dataset
+        _file   → arquivo de origem (útil para depuração)
+    """
+
+    key = f"/{collection}/events"
+    out: List[Dict[str, Any]] = []
+
+    with h5py.File(h5_path, "r") as h5:
+        # Se o dataset não existir, retorna lista vazia
+        if key not in h5:
+            return out
+
+        ds = h5[key]
+        n = int(ds.shape[0])
+
+        for i in range(n):
+            # Cada evento está armazenado como bytes contendo JSON
+            raw = np.array(ds[i], dtype=np.uint8).tobytes().decode(
+                "utf-8", errors="replace"
+            )
+
+            try:
+                ev = json.loads(raw)
+            except Exception:
+                # Se o JSON estiver corrompido, preserva o conteúdo bruto
+                ev = {"_raw": raw}
+
+            # Metadados úteis para depuração
+            ev["_index"] = i
+            ev["_file"] = h5_path
+
+            # Aplica filtro simples se solicitado
+            if where:
+                if any(ev.get(k) != v for k, v in where.items()):
+                    continue
+
+            out.append(ev)
+
+    return out
+
 
 def read_events(
     base_dir: str,
@@ -468,70 +546,112 @@ def read_events(
     *,
     last_n: Optional[int] = None,
     where: Optional[Dict[str, Any]] = None,
+    from_all_shards: bool = False,
+    prefer_merged: bool = False,
 ) -> List[Dict[str, Any]]:
     """
-    Lê eventos do dataset /<collection>/events e devolve uma lista de dicts (JSON).
+    Lê eventos de um experimento, podendo agregar múltiplos shards
+    e ordenar os resultados por timestamp.
 
-    Como seus eventos são append-only, o "último" evento está no final.
+    Esta função permite três estratégias de leitura:
 
-    Parâmetros:
-    - base_dir: caminho da pasta onde estão os h5
-    - experiment_id: id do experimento, usado para compor o caminho completo do o arquivo h5
-    - collection: nome da coleção (ex: "logs", "measures", "experiments")
-    - last_n: se informado, retorna apenas os últimos N eventos
-    - where: filtro simples por igualdade (AND). Ex:
-        where={"experiment_id": "exp42", "status": "finished"}
+    1) Arquivo merged (mais rápido para leitura)
+    2) Todos os shards do experimento
+    3) Apenas o shard do processo atual (modo legado)
 
-    Retorno:
-    - lista de eventos (cada um é dict). Cada evento recebe também "_index" (posição no dataset).
+    A ordenação final é feita pelo campo:
+        ev["ts"]
 
-    Observações:
-    - Se a coleção não existir ou estiver vazia, retorna [].
-    - Se existir linha inválida (JSON quebrado), ela entra como {"_raw": "..."}.
+    Parâmetros 
+    base_dir : str
+        Diretório onde os arquivos HDF5 do experimento estão armazenados.
+
+    experiment_id : str
+        Identificador único do experimento.
+        Usado para localizar arquivos como:
+            shard_<experiment_id>_pidXXXX.h5
+            merged_<experiment_id>.h5
+
+    collection : str
+        Nome da coleção dentro do HDF5.
+
+    last_n : int, opcional
+        Se informado, retorna apenas os últimos N eventos
+        após a ordenação por timestamp.
+
+        Importante:
+        O corte é global (após juntar todos os arquivos).
+
+    where : dict, opcional
+        Filtro simples:
+            {"campo": valor}
+
+    from_all_shards : bool, padrão=False
+        Se True:
+            Lê todos os shards do experimento.
+
+        Se False:
+            Lê apenas o shard do processo atual.
+
+    prefer_merged : bool, padrão=False
+        Se True e existir arquivo merged:
+            Usa apenas o merged.
+
+        Caso contrário:
+            Usa shards.
+
+    Retorno 
+    List[Dict[str, Any]]
+        Lista de eventos ordenados por timestamp crescente.
+
+    Fluxo interno 
+    1) Determina quais arquivos devem ser lidos
+    2) Lê eventos de cada arquivo
+    3) Junta tudo em memória
+    4) Ordena por timestamp
+    5) Aplica last_n se necessário
+
+    Observações 
+    - Eventos sem campo "ts" são enviados para o final.
+    - A ordenação é estável.
     """
-    path = shard_path(base_dir, experiment_id)
-    
-    key = f"/{collection}/events"
+
+    merged_path = default_merged_path(base_dir, experiment_id)
+    files_to_read: List[str] = []
+
+    # Escolha da estratégia de leitura
+    if prefer_merged and os.path.exists(merged_path):
+        # Caminho mais eficiente quando merge já foi realizado
+        files_to_read = [merged_path]
+
+    elif from_all_shards:
+        # Lê todos os shards existentes
+        files_to_read = list_shards(base_dir, experiment_id)
+
+    else:
+        # Comportamento antigo: apenas shard local
+        files_to_read = [shard_path(base_dir, experiment_id)]
+
+    # Leitura agregada
     out: List[Dict[str, Any]] = []
+    for fp in files_to_read:
+        if os.path.exists(fp):
+            out.extend(
+                _read_events_from_h5file(
+                    fp,
+                    collection,
+                    where=where
+                )
+            )
 
-    with h5py.File(path, "r") as h5:
-        if key not in h5:
-            return out
+    # Ordenação global por timestamp
+    # Eventos sem "ts" vão para o final
+    out.sort(key=lambda ev: float(ev.get("ts", float("inf"))))
 
-        ds = h5[key]
-        n = int(ds.shape[0])
-        if n == 0:
-            return out
-
-        # Define intervalo de leitura
-        if last_n is None:
-            start = 0
-        else:
-            last_n = max(0, int(last_n))
-            start = max(0, n - last_n)
-
-        # Lê e filtra
-        for i in range(start, n):
-            raw = np.array(ds[i], dtype=np.uint8).tobytes().decode("utf-8", errors="replace")
-
-            try:
-                ev = json.loads(raw)
-            except Exception:
-                ev = {"_raw": raw}
-
-            ev["_index"] = i
-
-            # Filtro simples: todos os campos precisam bater
-            if where:
-                ok = True
-                for k, v in where.items():
-                    if ev.get(k) != v:
-                        ok = False
-                        break
-                if not ok:
-                    continue
-
-            out.append(ev)
+    # Corte final
+    if last_n is not None:
+        last_n = max(0, int(last_n))
+        out = out[-last_n:] if last_n > 0 else []
 
     return out
 

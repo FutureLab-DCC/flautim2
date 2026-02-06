@@ -139,34 +139,8 @@ class Backend(object):
                 
         return fn_callback
         
-def get_argparser():
-    parser = argparse.ArgumentParser()
-    
-    parser.add_argument("--user", type=str, required=True)
-    parser.add_argument("--path", type=str, required=True)
-    parser.add_argument("--output-path", type=str, required=True)
-    parser.add_argument("--dbserver", type=str, required=False, default="127.0.0.1")
-    parser.add_argument("--dbport", type=str, required=False, default="27017")
-    parser.add_argument("--dbuser", type=str, required=True)
-    parser.add_argument("--dbpw", type=str, required=True)
-    parser.add_argument("--clients", type=int, required=False, default=3)
-    parser.add_argument("--rounds", type=int, required=False, default=10)
-    parser.add_argument("--epochs", type=int, required=False, default=10)
-    parser.add_argument("--h5_dir", type=str, required=True)
-    parser.add_argument("--IDexperiment", type=str, required=True, default=0)
-    ctx = parser.parse_args()
-    
-    backend = Backend(server = ctx.dbserver, port = ctx.dbport, user = ctx.dbuser, password=ctx.dbpw,
-                               h5_dir = ctx.h5_dir, experiment_id = ctx.IDexperiment)
-    
-    logger = Logger(backend, ctx)
-    measures = Measures(backend, ctx)
-    
-    return parser, ctx, backend, logger, measures
 
-#--------------------------------------------
-#GAMBIARRA TEMPORARIA
-def get_argparser2():
+def get_config():
 	import yaml
 	with open('./configs/config.yaml') as f:
 		cfg = yaml.safe_load(f)
@@ -179,9 +153,9 @@ def get_argparser2():
 		ctx.dbport = cfg['db_port']
 		ctx.dbuser = cfg['db_user']
 		ctx.dbpw = cfg['db_pw'] 
-		ctx.clients = "3"
-		ctx.round = "10"
-		ctx.epochs = "10"
+		#ctx.clients = "3"
+		#ctx.round = "10"
+		#ctx.epochs = "10"
 		ctx.IDexperiment = cfg['experiment_id']
 		ctx.h5_dir = cfg['h5_dir']
 		
@@ -192,7 +166,7 @@ def get_argparser2():
 		measures = Measures(backend, ctx)
 			   
 		return cfg, ctx, backend, logger, measures
-#--------------------------------------------
+
 
 class Logger(object):
     def __init__(self, backend, context):
@@ -247,7 +221,7 @@ class Output(object):
 
     def __init__(self, backend, context):
         """
-        backend  -> backend de banco (Mongo/SQLite), não usado diretamente aqui,
+        backend  -> backend de banco (Mongo), não usado diretamente aqui,
                     mas mantido para simetria com Logger/Measures.
         context  -> contexto global do experimento (contém h5_dir e experiment.id)
         """
@@ -567,7 +541,7 @@ def run_federated(client_fn, server_fn, name_log = 'flower.log', post_processing
     flower_logger.addHandler(console_handler)
 
     #_, ctx, backend, logger, _ = get_argparser()
-    _, ctx, backend, logger, _ = get_argparser2()
+    _, ctx, backend, logger, _ = get_config()
     experiment_id = ctx.IDexperiment
     path = ctx.path
     output_path = ctx.output_path
