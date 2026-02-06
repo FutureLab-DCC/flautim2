@@ -1,4 +1,4 @@
-from flautim2.pytorch.common import Backend, Logger, Measures, Config, Output
+from flautim2.pytorch.common import Backend, Logger, Measures, Config, Output, get_experiment_variables
 from flautim2.pytorch.h5_store import save_event, save_output, merge_experiment_h5
 import pandas as pd
 import yaml
