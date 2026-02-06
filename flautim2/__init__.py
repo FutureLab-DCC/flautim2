@@ -96,6 +96,14 @@ def init(use_db_server = True):
     }
 
     context = Config(config_file)
+ 
+    context.backend = Backend(server = context.db.dbserver, port = context.db.dbport,
+                               user = context.db.dbuser, password = context.db.dbpw, 
+                               h5_dir = context.filesystem.h5_dir, experiment_id = context.experiment.id)
+                               
+    context.logger = Logger(context.backend, context.filesystem)
+    context.measures = Measures(context.backend, context.experiment.id)
+    context.output = Output(context.backend, context)
 
     if context.db.dbserver == None: 
         experiment_variables = {
@@ -120,15 +128,7 @@ def init(use_db_server = True):
         experiment_variables = get_experiment_variables(context, True)
 		
     save_event( base_dir=context.filesystem.h5_dir, experiment_id=context.experiment.id, collection="experimento", doc=experiment_variables ) 
-	
-    context.backend = Backend(server = context.db.dbserver, port = context.db.dbport,
-                               user = context.db.dbuser, password = context.db.dbpw, 
-                               h5_dir = context.filesystem.h5_dir, experiment_id = context.experiment.id)
-                               
-    context.logger = Logger(context.backend, context.filesystem)
-    context.measures = Measures(context.backend, context.experiment.id)
-    context.output = Output(context.backend, context)
-
+    
 
     _init_instance.context = context
     

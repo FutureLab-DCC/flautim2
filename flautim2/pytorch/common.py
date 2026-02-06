@@ -404,10 +404,11 @@ def get_experiment_variables(context, all_var = False):
     # )
     # Use context manager to avoid leaks
     if context.backend._server == None:
-        return {"projectId": None,
-				"modelId": None,
-				"datasetId": None,
-				"acronym": None}
+        experiment_variables = read_events( base_dir=context.backend._h5_dir, experiment_id=context.experiment.id, collection = "experimento", where={"experiment_id": context.experiment.id } )[-1]
+        return {"projectId": experiment_variables["experiment_id"],
+				"modelId": experiment_variables["modelId"],
+				"datasetId": experiment_variables["datasetId"],
+				"acronym": experiment_variables["acronym"] }
     else:
         with pymongo.MongoClient(context.backend.connection_string) as client:
             db = client["flautim"]
@@ -434,11 +435,17 @@ class ExperimentContext(object):
         self.model = variables["modelId"]
         self.dataset = variables["datasetId"]
         self.acronym = variables["acronym"]
+        self.h5_dir = context.backend._h5_dir
 
-    def status(self, stat: ExperimentStatus): 
+    def status(self, stat: ExperimentStatus):   
         filter = { '_id': self.id }
         newvalues = { "$set": { 'status': str(stat) } }
         self.experiments.update_one(filter, newvalues)
+
+        experiment_variables = read_events( base_dir=self.h5_dir, experiment_id=self.id , collection = "experimento", where={"experiment_id": self.id  } )[-1]
+        experiment_variables["lastupdate"] = str(datetime.now())
+        experiment_variables["status"] = stat 
+        save_event( base_dir=self.h5_dir, experiment_id=self.id , collection="experimento", doc=experiment_variables ) 
 
 
 
