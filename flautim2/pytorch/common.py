@@ -20,7 +20,7 @@ import platform
 import psutil
 import subprocess
 
-from flautim2.pytorch.h5_store import save_event, read_events 
+from flautim2.pytorch.h5_store import save_event, read_events, merge_experiment_h5, default_merged_path 
 
 import json
 import threading
@@ -405,7 +405,10 @@ def get_experiment_variables(context, all_var = False):
     # Use context manager to avoid leaks
     if context.backend._server == None:
         experiment_variables = read_events( base_dir=context.backend._h5_dir, experiment_id=context.experiment.id, collection = "experimento", where={"experiment_id": context.experiment.id } )[-1]
-        return {"projectId": experiment_variables["experiment_id"],
+        if all_var == True:
+            return experiment_variables
+        else:
+            return {"projectId": experiment_variables["experiment_id"],
 				"modelId": experiment_variables["modelId"],
 				"datasetId": experiment_variables["datasetId"],
 				"acronym": experiment_variables["acronym"] }
@@ -576,6 +579,14 @@ def run_federated(client_fn, server_fn, name_log = 'flower.log', post_processing
 
         update_experiment_status(backend, experiment_id, "running")  
         
+        # Duplica a entrada na coleção experimento em cada processo ajustando o client_fn do usuario
+        experiment_variables = read_events( base_dir=backend._h5_dir, experiment_id=experiment_id, collection = "experimento", where={"experiment_id": experiment_id} )[-1]
+        _original_client_fn = client_fn
+        def client_fn(arg):  
+            if len( read_events( base_dir=backend._h5_dir, experiment_id=experiment_id, collection = "experimento" ) ) == 0:
+                save_event( base_dir=backend._h5_dir, experiment_id=experiment_id, collection="experimento", doc=experiment_variables )  
+            return _original_client_fn(arg)
+            
         client_app = ClientApp(client_fn=client_fn)
         server_app = ServerApp(server_fn=server_fn)
 
@@ -603,6 +614,8 @@ def run_federated(client_fn, server_fn, name_log = 'flower.log', post_processing
         copy_model_wights(path, output_path, experiment_id, logger) 
 
         logger.log("Stopping Flower Engine", details="", object="experiment_run", object_id=experiment_id )
+
+
     except Exception as ex:
         update_experiment_status(backend, experiment_id, "error")  
         logger.log("Error while running Flower", details=str(ex), object="experiment_run", object_id=experiment_id )
@@ -658,3 +671,29 @@ class Config(dict):
         self[name] = value
 
 
+def finalize_h5_merge(h5_dir, experiment_id):
+    """
+    Finaliza o armazenamento em HDF5 realizando o merge dos shards. 
+    """ 
+    
+    # Verifica se já existe um arquivo merged  
+    merged_file = default_merged_path(h5_dir, experiment_id)
+
+    if os.path.exists(merged_file):
+        print(f"{datetime.now()} - Merge já realizado anteriormente: {merged_file}", file=sys.stderr, flush=True)
+        return
+ 
+    # Executa o merge dos shards 
+    try:
+        print(f"{datetime.now()} - Fazendo merge dos H5 em: {h5_dir} (experiment_id={experiment_id})", file=sys.stderr, flush=True)
+
+        list_h5 = merge_experiment_h5(
+            base_dir=h5_dir,
+            experiment_id=experiment_id,
+            delete_shards_on_success=True,
+        )
+
+        print(f"{datetime.now()} - Merge realizado com sucesso. Shards usados: {list_h5}", file=sys.stderr, flush=True)
+
+    except Exception as e: 
+        print(f"{datetime.now()} - Erro ao realizar merge dos H5: {str(e)}", file=sys.stderr, flush=True)

@@ -1,11 +1,12 @@
-from flautim2.pytorch.common import Backend, Logger, Measures, Config, Output, get_experiment_variables
-from flautim2.pytorch.h5_store import save_event, save_output, merge_experiment_h5
+from flautim2.pytorch.common import Backend, Logger, Measures, Config, Output, get_experiment_variables, finalize_h5_merge
+from flautim2.pytorch.h5_store import save_event, save_output
 import pandas as pd
 import yaml
 import argparse
 
 import uuid
 from datetime import datetime 
+from functools import partial
 import os
 import atexit
 import signal
@@ -66,9 +67,6 @@ def create_offline_config(experiment_name: str, path_run_experiment: str):
     
     
 def init(use_db_server = True):
-    atexit.register(_finalizar_programa)
-    signal.signal(signal.SIGINT, _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
     
     global _init_instance
     _init_instance = Init()
@@ -133,33 +131,17 @@ def init(use_db_server = True):
     _init_instance.context = context
     
 
+    atexit.register(partial(finalize_h5_merge, context.filesystem.h5_dir, context.experiment.id))
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
+
     return context
-
-    
-def _finalizar_programa(): 
-    log("Finalizando programa...")
-
-    if _init_instance is None or _init_instance.context is None:
-        log("Nenhum contexto inicializado, nada para juntar.")
-        return
-
-    base_dir = _init_instance.context.filesystem.h5_dir
-    experiment_id = _init_instance.context.experiment.id
-
-    log(f"Fazendo merge dos H5 em: {base_dir} (experiment_id={experiment_id})")
-
-    list_h5 = merge_experiment_h5(
-        base_dir=base_dir,
-        experiment_id=experiment_id,
-		delete_shards_on_success=True,
-    )
-
-    print("Merge realizado ("+ str(list_h5) +")")
  
 
 def _handle_signal(sig, frame):
     log(f"handle_signal: {sig}")
-    _finalizar_programa()
+    finalize_h5_merge( _init_instance.filesystem.h5_dir, _init_instance.context.experiment.id )
     sys.exit(0)
     
     

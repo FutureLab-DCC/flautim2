@@ -308,14 +308,15 @@ def save_event(
     doc = _sanitize_for_json(doc)
 
     # sempre armazenamos experiment_id dentro do evento (ajuda no pós-processamento)
-    payload = {"ts": time.time(), "experiment_id": experiment_id, **doc}
+    payload = {**doc, "ts": time.time(), "experiment_id": experiment_id}
 
     raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     data = np.frombuffer(raw, dtype=np.uint8)
 
     # lock só para threads desse processo
     with _process_lock:
-        with h5py.File(path, "a") as h5:
+        with h5py.File(path, "a", libver="latest") as h5:
+            h5.swmr_mode = True
             ds = _ensure_events_dataset(h5, key)
             n = ds.shape[0]
             ds.resize((n + 1,))
@@ -390,7 +391,8 @@ def save_output(
     # Escreve no HDF5
     # -------------------------
     with _process_lock:
-        with h5py.File(path, "a") as h5:
+        with h5py.File(path, "a", libver="latest") as h5:
+            h5.swmr_mode = True
             outputs = h5.require_group("/outputs")
             meta = h5.require_group("/outputs/meta")
 
@@ -505,7 +507,7 @@ def _read_events_from_h5file(
     key = f"/{collection}/events"
     out: List[Dict[str, Any]] = []
 
-    with h5py.File(h5_path, "r") as h5:
+    with h5py.File(h5_path, "r", swmr=True) as h5:
         # Se o dataset não existir, retorna lista vazia
         if key not in h5:
             return out
