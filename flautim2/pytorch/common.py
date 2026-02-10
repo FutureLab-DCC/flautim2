@@ -533,7 +533,6 @@ def weighted_average(metrics) :
 
 
 def run_federated(client_fn, server_fn, name_log = 'flower.log', post_processing_fn = [], **kwargs):
-    experiment_variables = read_events( base_dir=backend._h5_dir, experiment_id=experiment_id, collection = "experimento", where={"experiment_id": experiment_id} )[-1]
 
     #self.metrics = Config(metrics) 
     logging.basicConfig(filename=name_log,
@@ -558,6 +557,9 @@ def run_federated(client_fn, server_fn, name_log = 'flower.log', post_processing
     output_path = ctx.output_path
     num_clients = kwargs.get("num_clients", 10)
     num_rounds = 15 #kwargs.get("num_rounds", ctx.rounds)
+
+    experiment_variables = read_events( base_dir=backend._h5_dir, experiment_id=experiment_id, collection = "experimento", where={"experiment_id": experiment_id} )[-1]
+
     
     logger.log("Starting Flower Engine", details="", object="experiment_run", object_id=experiment_id )
     logger.log(get_pod_log_info(), details="", object="experiment_run", object_id=experiment_id )
