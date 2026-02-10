@@ -533,6 +533,7 @@ def weighted_average(metrics) :
 
 
 def run_federated(client_fn, server_fn, name_log = 'flower.log', post_processing_fn = [], **kwargs):
+    experiment_variables = read_events( base_dir=backend._h5_dir, experiment_id=experiment_id, collection = "experimento", where={"experiment_id": experiment_id} )[-1]
 
     #self.metrics = Config(metrics) 
     logging.basicConfig(filename=name_log,
@@ -580,11 +581,10 @@ def run_federated(client_fn, server_fn, name_log = 'flower.log', post_processing
         update_experiment_status(backend, experiment_id, "running")  
         
         # Duplica a entrada na coleção experimento em cada processo ajustando o client_fn do usuario
-        experiment_variables = read_events( base_dir=backend._h5_dir, experiment_id=experiment_id, collection = "experimento", where={"experiment_id": experiment_id} )[-1]
         _original_client_fn = client_fn
         def client_fn(arg):  
-            if len( read_events( base_dir=backend._h5_dir, experiment_id=experiment_id, collection = "experimento" ) ) == 0:
-                save_event( base_dir=backend._h5_dir, experiment_id=experiment_id, collection="experimento", doc=experiment_variables )  
+            #if len( read_events( base_dir=backend._h5_dir, experiment_id=experiment_id, collection = "experimento" ) ) == 0:
+            save_event( base_dir=backend._h5_dir, experiment_id=experiment_id, collection="experimento", doc=experiment_variables )  
             return _original_client_fn(arg)
             
         client_app = ClientApp(client_fn=client_fn)
