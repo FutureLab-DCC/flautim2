@@ -404,14 +404,19 @@ def get_experiment_variables(context, all_var = False):
     # )
     # Use context manager to avoid leaks
     if context.backend._server == None:
-        experiment_variables = read_events( base_dir=context.backend._h5_dir, experiment_id=context.experiment.id, collection = "experimento", where={"experiment_id": context.experiment.id } )[-1]
-        if all_var == True:
-            return experiment_variables
-        else:
-            return {"projectId": experiment_variables["experiment_id"],
-				"modelId": experiment_variables["modelId"],
-				"datasetId": experiment_variables["datasetId"],
-				"acronym": experiment_variables["acronym"] }
+        #experiment_variables = read_events( base_dir=context.backend._h5_dir, experiment_id=context.experiment.id, collection = "experimento", where={"experiment_id": context.experiment.id } )[-1]
+        #if all_var == True:
+        #    return experiment_variables
+        #else:
+        #    return {"projectId": experiment_variables["experiment_id"],
+		#		"modelId": experiment_variables["modelId"],
+		#		"datasetId": experiment_variables["datasetId"],
+		#		"acronym": experiment_variables["acronym"] }
+        
+        return {"projectId": "",
+            "modelId":  "",
+            "datasetId":  "",
+            "acronym":  "" }
     else:
         with pymongo.MongoClient(context.backend.connection_string) as client:
             db = client["flautim"]
@@ -583,11 +588,11 @@ def run_federated(client_fn, server_fn, name_log = 'flower.log', post_processing
         update_experiment_status(backend, experiment_id, "running")  
         
         # Duplica a entrada na coleção experimento em cada processo ajustando o client_fn do usuario
-        _original_client_fn = client_fn
-        def client_fn(arg):  
-            #if len( read_events( base_dir=backend._h5_dir, experiment_id=experiment_id, collection = "experimento" ) ) == 0:
-            save_event( base_dir=backend._h5_dir, experiment_id=experiment_id, collection="experimento", doc=experiment_variables )  
-            return _original_client_fn(arg)
+        #_original_client_fn = client_fn
+        #def client_fn(arg):  
+        #    #if len( read_events( base_dir=backend._h5_dir, experiment_id=experiment_id, collection = "experimento" ) ) == 0:
+        #    save_event( base_dir=backend._h5_dir, experiment_id=experiment_id, collection="experimento", doc=experiment_variables )  
+        #    return _original_client_fn(arg)
             
         client_app = ClientApp(client_fn=client_fn)
         server_app = ServerApp(server_fn=server_fn)
