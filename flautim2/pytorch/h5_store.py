@@ -67,8 +67,14 @@ import numpy as np
 # ============================================================================
 # Concurrency: lock apenas entre THREADS do mesmo processo.
 # (Entre PROCESSOS não há lock porque cada processo escreve no seu próprio shard)
-# ============================================================================
-_process_lock = threading.Lock()
+# ============================================================================ 
+_process_lock = None  # type: ignore
+
+def _get_process_lock() -> threading.Lock:
+    global _process_lock
+    if _process_lock is None:
+        _process_lock = threading.Lock()
+    return _process_lock
 
 
 # ============================================================================
@@ -314,7 +320,7 @@ def save_event(
     data = np.frombuffer(raw, dtype=np.uint8)
 
     # lock só para threads desse processo
-    with _process_lock:
+    with _get_process_lock():
         with h5py.File(path, "a", libver="latest") as h5:
             h5.swmr_mode = True
             ds = _ensure_events_dataset(h5, key)
