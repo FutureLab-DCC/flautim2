@@ -396,7 +396,7 @@ def save_output(
     # -------------------------
     # Escreve no HDF5
     # -------------------------
-    with _process_lock:
+    with _get_process_lock():
         with h5py.File(path, "a", libver="latest") as h5:
             h5.swmr_mode = True
             outputs = h5.require_group("/outputs")
