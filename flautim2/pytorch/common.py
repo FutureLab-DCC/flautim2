@@ -26,7 +26,11 @@ import json
 import threading
 from bson import ObjectId 
 from contextlib import nullcontext
-
+ 
+# Desabilita o file locking do HDF5 para evitar erros de "Unable to lock file (errno=11)" em execuções com múltiplos
+# processos ou em sistemas de arquivos compartilhados (NFS). No Flautim cada processo escreve em um shard diferente,
+# portanto não há escrita concorrente no mesmo arquivo.
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
 def get_pod_log_info() -> str:
     info = []
@@ -404,7 +408,7 @@ def get_experiment_variables(context, all_var = False):
     # )
     # Use context manager to avoid leaks
     if context.backend._server == None:
-        experiment_variables = read_events( base_dir=context.backend._h5_dir, experiment_id=context.experiment.id, collection = "experimento", where={"experiment_id": context.experiment.id } )[-1]
+        experiment_variables = read_events( base_dir=context.backend._h5_dir, experiment_id=context.experiment.id, from_all_shards = True, collection = "experimento", where={"experiment_id": context.experiment.id } )[-1]
         if all_var == True:
             return experiment_variables
         else:
@@ -589,10 +593,10 @@ def run_federated(client_fn, server_fn, name_log = 'flower.log', post_processing
         
         # Duplica a entrada na coleção experimento em cada processo ajustando o client_fn do usuario
         _original_client_fn = client_fn
-        def client_fn(arg):  
-            if len( read_events( base_dir=backend._h5_dir, experiment_id=experiment_id, collection = "experimento" ) ) == 0:
-                save_event( base_dir=backend._h5_dir, experiment_id=experiment_id, collection="experimento", doc=experiment_variables )  
-            return _original_client_fn(arg)
+        #def client_fn(arg):  
+        #    if len( read_events( base_dir=backend._h5_dir, experiment_id=experiment_id, collection = "experimento" ) ) == 0:
+        #        save_event( base_dir=backend._h5_dir, experiment_id=experiment_id, collection="experimento", doc=experiment_variables )  
+        #    return _original_client_fn(arg)
             
         client_app = ClientApp(client_fn=client_fn)
         server_app = ServerApp(server_fn=server_fn)

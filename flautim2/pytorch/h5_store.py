@@ -59,6 +59,8 @@ import hashlib
 import threading
 from typing import Any, Dict, Optional, Iterable, List, Set
 from pathvalidate import sanitize_filename
+import random
+import time
 
 import h5py
 import numpy as np
@@ -284,6 +286,24 @@ def _ensure_events_dataset(h5: h5py.File, key: str) -> h5py.Dataset:
         chunks=(1024,),      # chunk para desempenho no append
     )
 
+def _open_h5_with_retry(
+    path: str,
+    mode: str,
+    *,
+    libver: str = "latest",
+    swmr: bool = False,
+    attempts: int = 30,
+    base_sleep: float = 0.02,
+):
+    """Abre arquivo HDF5 com retry/backoff para tolerar contenção temporária."""
+    last = None
+    for i in range(attempts):
+        try:
+            return h5py.File(path, mode, libver=libver, swmr=swmr)
+        except (BlockingIOError, OSError) as e:
+            last = e
+            time.sleep(base_sleep * (2 ** min(i, 6)) + random.random() * base_sleep)
+    raise last
 
 def save_event(
     *,
@@ -321,9 +341,18 @@ def save_event(
 
     # lock só para threads desse processo
     with _get_process_lock():
-        with h5py.File(path, "a", libver="latest") as h5:
-            h5.swmr_mode = True
+        with _open_h5_with_retry(path, "a", swmr=False) as h5:
+            #h5.swmr_mode = True
             ds = _ensure_events_dataset(h5, key)
+
+            #tenta ativar SWMR 
+            try:
+                if not h5.swmr_mode:
+                    h5.flush()
+                    h5.swmr_mode = True
+            except Exception:
+                pass
+
             n = ds.shape[0]
             ds.resize((n + 1,))
             ds[n] = data
@@ -397,11 +426,10 @@ def save_output(
     # Escreve no HDF5
     # -------------------------
     with _get_process_lock():
-        with h5py.File(path, "a", libver="latest") as h5:
-            h5.swmr_mode = True
+        with _open_h5_with_retry(path, "a", swmr=False) as h5: 
             outputs = h5.require_group("/outputs")
             meta = h5.require_group("/outputs/meta")
-
+  
             if store == "blobs":
                 blobs = outputs.require_group("blobs")
 
@@ -513,7 +541,7 @@ def _read_events_from_h5file(
     key = f"/{collection}/events"
     out: List[Dict[str, Any]] = []
 
-    with h5py.File(h5_path, "r", swmr=True) as h5:
+    with _open_h5_with_retry(h5_path, "r", swmr=True) as h5:
         # Se o dataset não existir, retorna lista vazia
         if key not in h5:
             return out
@@ -674,7 +702,7 @@ def _iter_event_rows(shard_file: str, collection: str) -> Iterable[bytes]:
     Itera sobre todas as linhas (bytes JSON) do dataset /<collection>/events em um shard.
     """
     key = f"/{collection}/events"
-    with h5py.File(shard_file, "r") as h5:
+    with h5py.File(shard_file, "r", libver="latest", swmr=True) as h5:
         if key not in h5:
             return
         ds = h5[key]
