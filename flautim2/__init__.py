@@ -138,10 +138,12 @@ def init(use_db_server = True):
 
     return context
  
+def h5_merge(): 
+    finalize_h5_merge( _init_instance.context.filesystem.h5_dir, _init_instance.context.experiment.id ) 
 
 def _handle_signal(sig, frame):
     log(f"handle_signal: {sig}")
-    finalize_h5_merge( _init_instance.filesystem.h5_dir, _init_instance.context.experiment.id )
+    finalize_h5_merge( _init_instance.context.filesystem.h5_dir, _init_instance.context.experiment.id )
     sys.exit(0)
     
     
