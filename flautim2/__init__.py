@@ -1,5 +1,5 @@
 from flautim2.pytorch.common import Backend, Logger, Measures, Config, Output, get_experiment_variables, finalize_h5_merge
-from flautim2.pytorch.h5_store import save_event, save_output
+from flautim2.pytorch.h5_store import save_event, save_output, default_merged_path
 import pandas as pd
 import yaml
 import argparse
@@ -29,9 +29,18 @@ def read_config():
 def create_offline_config(experiment_name: str, path_run_experiment: str):
 	if path_run_experiment is None:
 		raise ValueError("The path_run_experiment parameter cannot be None.")
-
+    
+    # Verifica se já existe um arquivo de configuração; caso exista, não o sobrescreve e encerra a função.
+	if os.path.isfile( str(os.path.join(path_run_experiment, "configs", "config.yaml"))  ):
+		config = read_config() 
+		experiment_id = config['experiment_id']
+		print(f"A configuration file already exists with experiment id '{experiment_id}'. Flautim will run using the existing configuration file.") 
+		return
+	else:
+		print(f"Configuration file does not exist. A new one will be created at '{path_run_experiment}/config/' .")           
+	
 	# Define o conteúdo padrão
-	uu_id = str(uuid.uuid4()) 
+	uu_id = "local-"+str(uuid.uuid4()) 
 	default_config = {
 		"db_server": None,
 		"db_port" : None,
@@ -94,6 +103,14 @@ def init(use_db_server = True):
     }
 
     context = Config(config_file)
+
+    # Caso já exista um arquivo HDF5 com o mesmo ID, pode ser que o usuário esteja reexecutando um experimento.
+    # Nesse caso, o arquivo HDF5 criado anteriormente deve ser removido.
+    merged_path_file = default_merged_path(context.filesystem.h5_dir, context.experiment.id) 
+    if os.path.isfile(merged_path_file):
+        print(f"Warning: An HDF5 file already exists for experiment with ID '{context.experiment.id}'. As a new execution is starting, the file will be deleted.")
+        os.remove(merged_path_file)
+
  
     context.backend = Backend(server = context.db.dbserver, port = context.db.dbport,
                                user = context.db.dbuser, password = context.db.dbpw, 
@@ -130,7 +147,7 @@ def init(use_db_server = True):
 
     _init_instance.context = context
     
-
+    # Tenta assegura que o merge dos shards HDF5 seja realizado durante o encerramento do programa.
     atexit.register(partial(finalize_h5_merge, context.filesystem.h5_dir, context.experiment.id))
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
