@@ -20,7 +20,7 @@ import platform
 import psutil
 import subprocess
 
-from flautim2.pytorch.h5_store import save_event, read_events, merge_experiment_h5, default_merged_path 
+from flautim2.pytorch.h5_store import save_event, read_events, merge_experiment_h5, default_merged_path, list_shards
 
 import json
 import threading
@@ -702,19 +702,83 @@ class Config(dict):
 
 def finalize_h5_merge(h5_dir, experiment_id):
     """
-    Finaliza o armazenamento em HDF5 realizando o merge dos shards. 
+    Finaliza o armazenamento em HDF5 realizando o merge dos shards.
+
+    - antes do merge, espera os shards ficarem 3s consecutivos sem alteração (size/mtime),
+      para reduzir falhas na validação quando algum processo ainda está escrevendo.
     """ 
-    
-    # Verifica se já existe um arquivo merged  
+
+    # Verifica se já existe um arquivo merged
     merged_file = default_merged_path(h5_dir, experiment_id)
 
     if os.path.exists(merged_file):
-        print(f"{datetime.now()} - Merge já realizado anteriormente: {merged_file}", file=sys.stderr, flush=True)
+        print(f"{datetime.now()} - Merge já realizado anteriormente: {merged_file}",file=sys.stderr,flush=True,)
         return
- 
-    # Executa o merge dos shards 
+
+    # Espera 3s consecutivos sem alteração nos shards
     try:
-        print(f"{datetime.now()} - Fazendo merge dos H5 em: {h5_dir} (experiment_id={experiment_id})", file=sys.stderr, flush=True)
+        shard_files = list_shards(h5_dir, experiment_id)
+
+        # Se não há shards, deixa o merge_experiment_h5 decidir (ele levanta FileNotFoundError)
+        if shard_files:
+            stable_required_s = 3.0
+            poll_s = 0.5
+            timeout_s = 60.0  # evita travar para sempre
+
+            # Snapshot inicial
+            last_stats = {}
+            for f in shard_files:
+                if os.path.exists(f):
+                    st = os.stat(f)
+                    last_stats[f] = (st.st_size, st.st_mtime)
+
+            stable_start = time.time()
+            wait_start = stable_start
+
+            while True:
+                time.sleep(poll_s)
+
+                # Re-lista shards (se algum processo criou shard novo, conta como "mudou")
+                current_shards = list_shards(h5_dir, experiment_id)
+                if set(current_shards) != set(shard_files):
+                    shard_files = current_shards
+                    last_stats = {}
+                    for f in shard_files:
+                        if os.path.exists(f):
+                            st = os.stat(f)
+                            last_stats[f] = (st.st_size, st.st_mtime)
+                    stable_start = time.time()
+
+                changed = False
+
+                for f in shard_files:
+                    if not os.path.exists(f):
+                        changed = True
+                        last_stats.pop(f, None)
+                        continue
+
+                    st = os.stat(f)
+                    cur = (st.st_size, st.st_mtime)
+                    if last_stats.get(f) != cur:
+                        changed = True
+                        last_stats[f] = cur
+
+                if changed:
+                    stable_start = time.time()
+                else:
+                    if (time.time() - stable_start) >= stable_required_s:
+                        break  # ficou 3s sem mudar
+
+                if (time.time() - wait_start) >= timeout_s:
+                    print(f"{datetime.now()} - Aviso: shards não estabilizaram em {timeout_s}s; seguindo com merge mesmo assim.",file=sys.stderr,flush=True,)
+                    break
+
+    except Exception as e:
+        print(f"{datetime.now()} - Aviso: falha ao esperar estabilização dos shards: {str(e)}",file=sys.stderr,flush=True,)
+
+    # Executa o merge dos shards
+    try:
+        print(f"{datetime.now()} - Fazendo merge dos H5 em: {h5_dir} (experiment_id={experiment_id})",file=sys.stderr,flush=True,)
 
         list_h5 = merge_experiment_h5(
             base_dir=h5_dir,
@@ -722,7 +786,7 @@ def finalize_h5_merge(h5_dir, experiment_id):
             delete_shards_on_success=True,
         )
 
-        print(f"{datetime.now()} - Merge realizado com sucesso. Shards usados: {list_h5}", file=sys.stderr, flush=True)
+        print(f"{datetime.now()} - Merge realizado com sucesso. Shards usados: {list_h5}",file=sys.stderr,flush=True,)
 
-    except Exception as e: 
-        print(f"{datetime.now()} - Erro ao realizar merge dos H5: {str(e)}", file=sys.stderr, flush=True)
+    except Exception as e:
+        print(f"{datetime.now()} - Erro ao realizar merge dos H5: {str(e)}",file=sys.stderr,flush=True)
