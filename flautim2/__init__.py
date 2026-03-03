@@ -143,7 +143,7 @@ def init(use_db_server = True):
         experiment_variables = get_experiment_variables(context, True)
 		
     save_event( base_dir=context.filesystem.h5_dir, experiment_id=context.experiment.id, collection="experimento", doc=experiment_variables ) 
-    
+    log(f"h5_dir: {context.filesystem.h5_dir}") #TODO: remover depois
 
     _init_instance.context = context
     
