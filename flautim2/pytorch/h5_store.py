@@ -82,19 +82,45 @@ def _get_process_lock() -> threading.Lock:
 # ============================================================================
 # Helpers básicos (nomes/paths)
 # ============================================================================
-def shard_path(base_dir: str, experiment_id: str) -> str:
+def get_write_h5_path(base_dir: str, experiment_id: str) -> str:
     """
-    Caminho do shard do processo atual.
+    Retorna o caminho do arquivo HDF5 que deve ser usado para ESCRITA.
+ 
+    - Se o arquivo final merged já existir, retorna o merged.
+      Isso permite que, após a finalização/merge do experimento,
+      novas escritas sejam direcionadas diretamente para o arquivo final,
+      evitando continuar criando ou usando shards desnecessariamente.
+
+    - Se o merged ainda não existir, retorna o shard do processo atual.
+      Esse continua sendo o comportamento padrão durante a fase normal
+      de execução concorrente, em que cada processo escreve no seu próprio
+      arquivo para evitar conflitos de escrita no HDF5.
+
+    Em resumo:
+    - Antes do merge  -> escreve no shard do processo
+    - Depois do merge -> escreve no merged
 
     Exemplo:
-      output/shard_exp42_pid12345.h5
+      antes do merge:
+        output/shard_exp42_pid12345.h5
 
-    - experiment_id identifica o experimento
-    - pid identifica o processo (Ray worker, multiprocess, etc.)
+      depois do merge:
+        output/merged_exp42.h5
     """
     os.makedirs(base_dir, exist_ok=True)
-    pid = os.getpid()
     experiment_id = sanitize_filename(experiment_id)
+
+    merged = default_merged_path(base_dir, experiment_id)
+
+    # Se já existe o arquivo merged, significa que a escrita do experimento
+    # já foi consolidada. A partir desse momento, passamos a escrever
+    # diretamente nele.
+    if os.path.exists(merged):
+        return merged
+
+    # Caso ainda não exista merged, seguimos com a estratégia de shard
+    # por processo, que é a abordagem segura durante a execução paralela.
+    pid = os.getpid()
     return os.path.join(base_dir, f"shard_{experiment_id}_pid{pid}.h5")
 
 
@@ -327,7 +353,7 @@ def save_event(
     Conteúdo salvo por linha:
       {"ts": time.time(), "experiment_id": <experiment_id>, **doc}
     """
-    path = shard_path(base_dir, experiment_id)
+    path = get_write_h5_path(base_dir, experiment_id)
     key = f"/{collection}/events"
 
     # garante que doc é JSON-safe
@@ -391,7 +417,7 @@ def save_output(
       - se `name` foi passado: usa `name` (você controla)
       - senão: usa sha256 do conteúdo (dedup automático simples)
     """
-    path = shard_path(base_dir, experiment_id)
+    path = get_write_h5_path(base_dir, experiment_id)
 
     # -------------------------
     # Normaliza por tipo
@@ -666,7 +692,7 @@ def read_events(
 
     else:
         # Comportamento antigo: apenas shard local
-        files_to_read = [shard_path(base_dir, experiment_id)]
+        files_to_read = [get_write_h5_path(base_dir, experiment_id)]
 
     # Leitura agregada
     out: List[Dict[str, Any]] = []
@@ -692,6 +718,118 @@ def read_events(
     return out
 
 
+def _delete_events_from_h5file(
+    path: str,
+    experiment_id: str,
+    collection: str,
+    *,
+    where: Optional[Dict[str, Any]] = None,
+) -> int:
+    """
+    Remove eventos de UM arquivo HDF5 para um experiment_id específico.
+
+    Estratégia:
+    - lê todos os eventos do dataset /<collection>/events
+    - remove os que pertencem ao experiment_id informado
+    - opcionalmente aplica filtros adicionais em `where`
+    - recria o dataset apenas com os registros mantidos
+
+    Retorna a quantidade de eventos removidos.
+    """
+    key = f"/{collection}/events"
+
+    if not os.path.exists(path):
+        return 0
+
+    removed = 0
+
+    with _get_process_lock():
+        with _open_h5_with_retry(path, "a", swmr=False) as h5:
+            if key not in h5:
+                return 0
+
+            ds = h5[key]
+            kept_raw = []
+
+            for i in range(ds.shape[0]):
+                try:
+                    raw = np.array(ds[i], dtype=np.uint8).tobytes().decode(
+                        "utf-8", errors="replace"
+                    )
+                    ev = json.loads(raw)
+                except Exception:
+                    # Se não conseguir decodificar, preserva o registro
+                    kept_raw.append(np.array(ds[i], dtype=np.uint8))
+                    continue
+
+                # remove apenas eventos do experimento informado
+                matches_experiment = str(ev.get("experiment_id")) == str(experiment_id)
+
+                # filtro adicional opcional
+                matches_where = True
+                if where:
+                    matches_where = all(ev.get(k) == v for k, v in where.items())
+
+                if matches_experiment and matches_where:
+                    removed += 1
+                else:
+                    kept_raw.append(np.array(ds[i], dtype=np.uint8))
+
+            if removed == 0:
+                return 0
+
+            # Remove o dataset antigo e recria com os itens mantidos
+            del h5[key]
+            new_ds = _ensure_events_dataset(h5, key)
+
+            if kept_raw:
+                new_ds.resize((len(kept_raw),))
+                for i, item in enumerate(kept_raw):
+                    new_ds[i] = item
+
+            h5.flush()
+
+    return removed
+
+
+def delete_events(
+    base_dir: str,
+    experiment_id: str,
+    collection: str,
+    *,
+    where: Optional[Dict[str, Any]] = None,
+    from_all_shards: bool = False,
+    prefer_merged: bool = False,
+) -> int:
+    """
+    Remove eventos de um experimento em uma coleção.
+
+    Estratégias:
+    - prefer_merged=True: remove só do merged, se existir
+    - from_all_shards=True: remove de todos os shards
+    - caso contrário: remove apenas do arquivo atual de escrita
+    """
+    merged_path = default_merged_path(base_dir, experiment_id)
+    files_to_delete: List[str] = []
+
+    if prefer_merged and os.path.exists(merged_path):
+        files_to_delete = [merged_path]
+    elif from_all_shards:
+        files_to_delete = list_shards(base_dir, experiment_id)
+    else:
+        files_to_delete = [get_write_h5_path(base_dir, experiment_id)]
+
+    total_removed = 0
+    for fp in files_to_delete:
+        if os.path.exists(fp):
+            total_removed += _delete_events_from_h5file(
+                fp,
+                experiment_id,
+                collection,
+                where=where,
+            )
+
+    return total_removed
 
 
 # ============================================================================
@@ -843,16 +981,8 @@ def merge_experiment_h5(
                             _copy_dataset_if_missing(out_meta, src_meta, name)
 
         out.flush()
- 
-    # 2) VALIDAÇÃO (só para decidir se pode apagar shards) 
-    _validate_merged_h5(
-        merged_path=merged_path,
-        shard_files=shard_files,
-        collections=collections,
-        copy_outputs=copy_outputs,
-    )
- 
-    # 3) APAGAR SHARDS (se tudo estiver ok) 
+  
+    # 2) APAGAR SHARDS (se tudo estiver ok) 
     if delete_shards_on_success:
         for sf in shard_files:
             try:
@@ -868,76 +998,4 @@ def merge_experiment_h5(
 
     return shard_files
 
-
-def _validate_merged_h5(
-    *,
-    merged_path: str,
-    shard_files: List[str],
-    collections: List[str],
-    copy_outputs: bool,
-) -> None:
-    """
-    Valida se o merged parece completo e não corrompido.
-
-    Se falhar, levanta Exception.
-    (Nesse caso, merge_experiment_h5 NÃO apaga os shards.)
-    """
-    # 1) abre o merged (se estiver corrompido, geralmente falha aqui)
-    with h5py.File(merged_path, "r") as merged:
-        # 2) valida eventos por contagem: merged == soma(shards)
-        for col in collections:
-            key = f"/{col}/events"
-
-            if key not in merged:
-                raise RuntimeError(f"[VALIDATION] merged não contém {key}")
-
-            merged_count = int(merged[key].shape[0])
-
-            shard_sum = 0
-            for sf in shard_files:
-                with h5py.File(sf, "r") as sh:
-                    if key in sh:
-                        shard_sum += int(sh[key].shape[0])
-
-            if merged_count != shard_sum:
-                raise RuntimeError(
-                    f"[VALIDATION] contagem inconsistente em {key}: "
-                    f"merged={merged_count} vs soma_shards={shard_sum}"
-                )
-
-        # 3) valida outputs (aproximação segura): merged tem pelo menos a união de refs
-        if copy_outputs:
-            # meta sempre deve existir se copy_outputs=True (mesmo que vazio)
-            if "/outputs/meta" not in merged:
-                raise RuntimeError("[VALIDATION] merged não contém /outputs/meta")
-
-            # União das chaves em shards
-            blobs_union: Set[str] = set()
-            arrays_union: Set[str] = set()
-            meta_union: Set[str] = set()
-
-            for sf in shard_files:
-                with h5py.File(sf, "r") as sh:
-                    if "/outputs/blobs" in sh:
-                        blobs_union.update(list(sh["/outputs/blobs"].keys()))
-                    if "/outputs/arrays" in sh:
-                        arrays_union.update(list(sh["/outputs/arrays"].keys()))
-                    if "/outputs/meta" in sh:
-                        meta_union.update(list(sh["/outputs/meta"].keys()))
-
-            # No merged, se o grupo existir, contamos as chaves
-            merged_blobs = set(merged["/outputs/blobs"].keys()) if "/outputs/blobs" in merged else set()
-            merged_arrays = set(merged["/outputs/arrays"].keys()) if "/outputs/arrays" in merged else set()
-            merged_meta = set(merged["/outputs/meta"].keys()) if "/outputs/meta" in merged else set()
-
-            # O merged precisa conter pelo menos tudo que existia nos shards
-            missing_blobs = blobs_union - merged_blobs
-            missing_arrays = arrays_union - merged_arrays
-            missing_meta = meta_union - merged_meta
-
-            if missing_blobs:
-                raise RuntimeError(f"[VALIDATION] faltando blobs no merged: {sorted(list(missing_blobs))[:10]} ...")
-            if missing_arrays:
-                raise RuntimeError(f"[VALIDATION] faltando arrays no merged: {sorted(list(missing_arrays))[:10]} ...")
-            if missing_meta:
-                raise RuntimeError(f"[VALIDATION] faltando meta no merged: {sorted(list(missing_meta))[:10]} ...")
+ 

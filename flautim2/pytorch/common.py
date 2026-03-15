@@ -20,7 +20,7 @@ import platform
 import psutil
 import subprocess
 
-from flautim2.pytorch.h5_store import save_event, read_events, merge_experiment_h5, default_merged_path, list_shards
+from flautim2.pytorch.h5_store import save_event, read_events, merge_experiment_h5, default_merged_path, list_shards, delete_events
 
 import json
 import threading
@@ -128,7 +128,7 @@ class Backend(object):
         
         save_event( base_dir=self._h5_dir, experiment_id=str(self._experiment_id), collection=str(collection), doc=msg )
             
-        print("[DB save]", collection, msg , sep="|")
+        #print("[DB save]", collection, msg , sep="|")
 
 
     def close_db(self):
@@ -151,9 +151,10 @@ class Backend(object):
                 else:
                    collection.update_one(filter_query, {"$set": {"content": content}})
           
-           
+
+        delete_events(  base_dir=self._h5_dir, experiment_id=str(self._experiment_id), collection="experiment_results", where={"Experiment": experiment} )   
         save_event( base_dir=self._h5_dir, experiment_id=str(self._experiment_id), collection=str("experiment_results"), doc={"Experiment": experiment, "content": content} )
-        print("[DB save]", "experiment_results", str(content) , sep="|")   
+        #print("[DB save]", "experiment_results", str(content) , sep="|")   
                         
     
     def write_experiment_results_callback(self, file_path, experiment):

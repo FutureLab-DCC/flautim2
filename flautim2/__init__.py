@@ -151,6 +151,19 @@ def init(use_db_server = True):
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
+    sys.stdout = PrintLogger(
+        sys.__stdout__,
+        context.filesystem.h5_dir,
+        context.experiment.id,
+        "stdout"
+    )
+
+    sys.stderr = PrintLogger(
+        sys.__stderr__,
+        context.filesystem.h5_dir,
+        context.experiment.id,
+        "stderr"
+    )
 
     log(f"h5_dir: {context.filesystem.h5_dir}") #TODO: remover depois
     return context
@@ -163,7 +176,51 @@ def _handle_signal(sig, frame):
     finalize_h5_merge( _init_instance.context.filesystem.h5_dir, _init_instance.context.experiment.id )
     sys.exit(0)
     
-    
+class PrintLogger:
+    def __init__(self, original_stream, h5_dir, experiment_id, stream_name="stdout"):
+        self.original_stream = original_stream
+        self.h5_dir = h5_dir
+        self.experiment_id = experiment_id
+        self.stream_name = stream_name
+        self.buffer = ""
+        self.saving = False
+
+    def write(self, text):
+        self.original_stream.write(text)
+        self.buffer += text
+
+        if self.saving:
+            return
+
+        while "\n" in self.buffer:
+            line, self.buffer = self.buffer.split("\n", 1)
+            if line.strip():
+                try:
+                    self.saving = True
+                    save_event(
+                        base_dir=self.h5_dir,
+                        experiment_id=str(self.experiment_id),
+                        collection="prints_log",
+                        doc={
+                            "message": line,
+                            "stream": self.stream_name
+                        }
+                    )
+                except Exception:
+                    # nunca deixa quebrar stdout/stderr
+                    pass
+                finally:
+                    self.saving = False
+
+    def flush(self):
+        self.original_stream.flush()
+
+    def fileno(self):
+        return self.original_stream.fileno()
+
+    def isatty(self):
+        return self.original_stream.isatty()
+
 def log(message, details = "", object = ""):
     _init_instance.context.logger.log(message, details=str(details), object=str(object), object_id=_init_instance.context.experiment.id)
     
