@@ -12,7 +12,7 @@ POR QUE ISSO FUNCIONA COM THREADS / PROCESSOS / RAY?
 - Ray normalmente cria vários processos (workers).
 - HDF5 (via h5py) não é seguro para múltiplos escritores no MESMO arquivo.
 - Solução simples e robusta: cada PROCESSO escreve no seu próprio arquivo shard:
-    output/shard_<experiment_id>_pid<PID>.h5
+    output/shard_<experiment_id>_pid<PID>_experiment.h5
 
 Dentro do mesmo processo, pode haver threads:
 - Para evitar duas threads escreverem ao mesmo tempo no mesmo shard do processo,
@@ -21,12 +21,12 @@ Dentro do mesmo processo, pode haver threads:
 ARQUIVOS GERADOS (todos no mesmo diretório base_dir):
 ----------------------------------------------------
 - Shards:
-    base_dir/shard_<experiment_id>_pid12345.h5
-    base_dir/shard_<experiment_id>_pid12346.h5
+    base_dir/shard_<experiment_id>_pid12345_experiment.h5
+    base_dir/shard_<experiment_id>_pid12346_experiment.h5
     ...
 
 - Arquivo final (merge):
-    base_dir/merged_<experiment_id>.h5
+    base_dir/merged_<experiment_id>_experiment.h5
 
 ESTRUTURA DENTRO DO HDF5:
 -------------------------
@@ -102,10 +102,10 @@ def get_write_h5_path(base_dir: str, experiment_id: str) -> str:
 
     Exemplo:
       antes do merge:
-        output/shard_exp42_pid12345.h5
+        output/shard_exp42_pid12345_experiment.h5
 
       depois do merge:
-        output/merged_exp42.h5
+        output/merged_exp42_experiment.h5
     """
     os.makedirs(base_dir, exist_ok=True)
     experiment_id = sanitize_filename(experiment_id)
@@ -121,7 +121,7 @@ def get_write_h5_path(base_dir: str, experiment_id: str) -> str:
     # Caso ainda não exista merged, seguimos com a estratégia de shard
     # por processo, que é a abordagem segura durante a execução paralela.
     pid = os.getpid()
-    return os.path.join(base_dir, f"shard_{experiment_id}_pid{pid}.h5")
+    return os.path.join(base_dir, f"shard_{experiment_id}_pid{pid}_experiment.h5")
 
 
 def list_shards(base_dir: str, experiment_id: str) -> List[str]:
@@ -129,7 +129,7 @@ def list_shards(base_dir: str, experiment_id: str) -> List[str]:
     Lista todos os shards daquele experimento no diretório base_dir.
     """
     experiment_id = sanitize_filename(experiment_id)
-    pattern = os.path.join(base_dir, f"shard_{experiment_id}_pid*.h5")
+    pattern = os.path.join(base_dir, f"shard_{experiment_id}_pid*_experiment.h5")
     return sorted(glob.glob(pattern))
 
 
@@ -139,7 +139,7 @@ def default_merged_path(base_dir: str, experiment_id: str) -> str:
     """
     experiment_id = sanitize_filename(experiment_id)
     os.makedirs(base_dir, exist_ok=True)
-    return os.path.join(base_dir, f"merged_{experiment_id}.h5")
+    return os.path.join(base_dir, f"merged_{experiment_id}_experiment.h5")
 
 
 def _sha256(data: bytes) -> str:
@@ -536,7 +536,7 @@ def _read_events_from_h5file(
     Lê eventos de um único arquivo HDF5.
 
     Esta função é responsável apenas por abrir um arquivo específico
-    (.h5), localizar o dataset de eventos e converter cada registro
+    (_experiment.h5), localizar o dataset de eventos e converter cada registro
     JSON armazenado em um dicionário Python.
 
     Parâmetros:
@@ -631,8 +631,8 @@ def read_events(
     experiment_id : str
         Identificador único do experimento.
         Usado para localizar arquivos como:
-            shard_<experiment_id>_pidXXXX.h5
-            merged_<experiment_id>.h5
+            shard_<experiment_id>_pidXXXX_experiment.h5
+            merged_<experiment_id>_experiment.h5
 
     collection : str
         Nome da coleção dentro do HDF5.
@@ -936,7 +936,7 @@ def merge_experiment_h5(
     if not shard_files:
         raise FileNotFoundError(
             f"Nenhum shard encontrado em {base_dir} para experiment_id={experiment_id}. "
-            f"Esperado padrão: shard_{experiment_id}_pid*.h5"
+            f"Esperado padrão: shard_{experiment_id}_pid*_experiment.h5"
         )
 
     # Se não foi passado, descobre tudo automaticamente

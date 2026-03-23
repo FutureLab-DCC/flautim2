@@ -168,14 +168,32 @@ def init(use_db_server = True):
     log(f"h5_dir: {context.filesystem.h5_dir}") #TODO: remover depois
     return context
  
-def h5_merge(): 
-    finalize_h5_merge( _init_instance.context.filesystem.h5_dir, _init_instance.context.experiment.id ) 
+def finalize_experiment(): 
+    finalize_h5_merge( _init_instance.context.filesystem.h5_dir, _init_instance.context.experiment.id )  
 
 def _handle_signal(sig, frame):
     log(f"handle_signal: {sig}")
     finalize_h5_merge( _init_instance.context.filesystem.h5_dir, _init_instance.context.experiment.id )
     sys.exit(0)
     
+def log(message, details = "", object = ""):
+    _init_instance.context.logger.log(message, details=str(details), object=str(object), object_id=_init_instance.context.experiment.id)
+    
+def measures(experiment, metric, values, validation = False):
+    experiment.context.measures.log(experiment, metric, values, validation)
+
+def output_image(content: bytes, name=None, meta=None):
+    return _init_instance.context.output.image(content, name=name, meta=meta)
+
+def output_array(arr, name=None, meta=None):
+    return _init_instance.context.output.array(arr, name=name, meta=meta)
+
+def output_text(text: str, name=None, meta=None):
+    return _init_instance.context.output.text(text, name=name, meta=meta)
+
+def output_json(obj, name=None, meta=None):
+    return _init_instance.context.output.json(obj, name=name, meta=meta)
+
 class PrintLogger:
     def __init__(self, original_stream, h5_dir, experiment_id, stream_name="stdout"):
         self.original_stream = original_stream
@@ -220,22 +238,3 @@ class PrintLogger:
 
     def isatty(self):
         return self.original_stream.isatty()
-
-def log(message, details = "", object = ""):
-    _init_instance.context.logger.log(message, details=str(details), object=str(object), object_id=_init_instance.context.experiment.id)
-    
-def measures(experiment, metric, values, validation = False):
-    experiment.context.measures.log(experiment, metric, values, validation)
-
-def output_image(content: bytes, name=None, meta=None):
-    return _init_instance.context.output.image(content, name=name, meta=meta)
-
-def output_array(arr, name=None, meta=None):
-    return _init_instance.context.output.array(arr, name=name, meta=meta)
-
-def output_text(text: str, name=None, meta=None):
-    return _init_instance.context.output.text(text, name=name, meta=meta)
-
-def output_json(obj, name=None, meta=None):
-    return _init_instance.context.output.json(obj, name=name, meta=meta)
-
